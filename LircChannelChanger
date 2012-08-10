@@ -1,0 +1,910 @@
+#!/usr/bin/perl
+
+#
+# LircChannelChanger - Version 0.4 - 2012/08/08
+#
+
+#
+# Copyright (c) 2009-2012 Gary Buhrmaster <gary.buhrmaster@gmail.com>
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+#
+# Channel Changing script for mythtv and lirc
+#
+# There are a lot of channel changing scripts for mythtv and lirc,
+# this one differs in its ability to support more flexible options
+# from the command line, allowing one script to do the work of many.
+# It also supports locking, to insure that only one channel changer
+# is being run at once (this is important with multiple tuners and
+# with multiple programs independently running/changing channels
+# since irsend "SET_TRANSMITTERS" is global).
+# 
+
+#
+# Our perl dependencies
+#
+use strict;
+use Fcntl qw(:DEFAULT :flock);
+use IPC::SysV qw(SEM_UNDO IPC_PRIVATE IPC_NOWAIT S_IRUSR S_IWUSR IPC_CREAT);
+use IPC::Semaphore;
+use Getopt::Long qw(GetOptions GetOptionsFromString);
+use Time::HiRes qw (sleep);
+use FindBin qw($Bin $Script);
+use File::Basename;
+use File::Path qw(make_path);
+
+#
+# locktype can be either semaphore or file or none.
+# semaphore only tested for linux (which has
+# semaphore cleanup protections).  None is not
+# recommended (since running multiple apps using
+# lirc is going to eventually cause confusion).
+#
+my $locktype      = 'semaphore';
+my $lockwait      = 0.5;             # Time to wait if locking fails
+my $lockattempts  = 60;              # Number of attempts to obtain lock
+my $lockfile      = '/tmp/LircChannelChanger.lock';
+my $lockFH;
+my $locksemkey    = 727522346;       # "Random" value for key
+my $locksem;
+my $lockperm      = 0777;            # Default lock file/semaphore permissions
+my $lockfinegrain = 0;               # Fine Grained locking
+my $lockobtained  = 0;               # Track locking (for last gasp release)
+
+my @transmitters;                    # Transmitters to send on
+my $key;                             # General key variable
+my @FREQID;                          # The (possibly transformed) freqid string
+my $prevkey       = '';              # Previously issued key
+my $device;                          # lirc --device value
+my $address;                         # lirc --address value
+my $delay;                           # Delay after keys (for all)
+my $tdelay        = 0;               # Delay after set_transmitters
+my $bdelay;                          # Delay after before keys
+my $adelay;                          # Delay after after keys
+my $ddelay;                          # Delay after digit keys
+my $rdelay        = 0;               # Delay between repeated keys
+my $idelay        = 0;               # Delay after initialization (after lock)
+my $edelay        = 0;               # Delay before exit (before lock release)
+my $delayaccum    = 0;               # Delay accumulated
+my @before;                          # Keys to send before channel
+my @after;                           # Keys to send after channel
+my $digitprefix;                     # Digit Keyname prefix (sometimes key_)
+my $digitnames;                      # Use digit names (i.e. 1 -> One)
+my $irsendoptions = '';              # Constructed options for irsend
+my $debug         = 0;               # Debug messages
+my $remote;                          # Remote name
+my $channeldigits;                   # Number of channel digits
+my $channeltransform;                # Channel number transform routine
+my @precmds;                         # Pre lirc commands
+my @postcmds;                        # Post lirc commands
+my $help          = 0;               # Help?
+my $irsend        = 'irsend';        # Lirc irsend program
+my $irsendxmitter = 0;               # Set transmitter sent
+
+my %digitname;
+   $digitname{0}  = 'Zero'; 
+   $digitname{1}  = 'One';
+   $digitname{2}  = 'Two';
+   $digitname{3}  = 'Three';
+   $digitname{4}  = 'Four';
+   $digitname{5}  = 'Five';
+   $digitname{6}  = 'Six';
+   $digitname{7}  = 'Seven';
+   $digitname{8}  = 'Eight';
+   $digitname{9}  = 'Nine';
+
+#
+# END block for freeing lock due to unusual exiting
+#
+# This *should* not be needed, since locks should be
+# properly released at exit.  But better safe ....
+#
+END
+  {
+    if ($lockobtained != 0)
+      {
+        printf STDERR "END block invoked to free locks\n" if($debug);
+        if (!lockFree())
+          {
+            print "Unable to free lock\n";
+          }
+        else
+          {
+            printf STDERR "Lock freed\n" if($debug);
+          }
+      }
+    $lockobtained = 0;
+  }
+
+#
+# Try to insure that signals causes lock freeing
+#
+# Again, *should* not be needed, since process termination
+# is expected to clean up correctly.  But better safe....
+#
+$SIG{INT} = $SIG{TERM} = $SIG{QUIT} = $SIG{HUP} = sub { my $sig = shift; die "\nSIG$sig received: $!\n"}; 
+
+#
+# Use GetOptions to process the command line options
+#
+if (!GetOptions ( "device=s"                     => \$device,
+                  "address=s"                    => \$address,
+                  "delay=f"                      => \$delay,
+                  "tdelay=f"                     => \$tdelay,
+                  "bdelay=f"                     => \$bdelay,
+                  "adelay=f"                     => \$adelay,
+                  "ddelay=f"                     => \$ddelay,
+                  "rdelay=f"                     => \$rdelay,
+                  "idelay=f"                     => \$idelay,
+                  "edelay=f"                     => \$edelay,
+                  "xmitter|transmitter=i"        => \@transmitters,
+                  "beforekeys=s"                 => sub { push @before, split(' ', (@_[1]))},
+                  "afterkeys=s"                  => sub { push @after, split(' ', (@_[1]))},
+                  "digitprefix=s"                => \$digitprefix,
+                  "digitnames!"                  => \$digitnames,
+                  "channeldigits=i"              => \$channeldigits,
+                  "channeltransform=s"           => \$channeltransform,
+                  "remote=s"                     => \$remote,
+                  "cf|configfilename=s"          => sub { processConfig(@_[1]) },
+                  "locktype=s"                   => \$locktype,
+                  "lockfilename=s"               => \$lockfile,
+		  "lockkey=o"                    => \$locksemkey,
+                  "lockperm=o"                   => \$lockperm,
+                  "lockfinegrained!"             => \$lockfinegrain,
+                  "precmd|precommand=s"          => \@precmds,
+                  "postcmd|postcommand=s"        => \@postcmds,
+                  "irsend=s"                     => \$irsend,
+		  "help!"                        => \$help,
+                  "debug!"                       => \$debug))
+  {
+    exit 1;
+  }
+
+#
+# print out script usage for "help" argument or incorrect usage of command
+#
+if ($help)
+  {
+    my $usage = <<ECHO;
+
+$Script:
+    Script to perform channel changing for mythtv using lirc
+
+    Usage: $Script <options> nnn
+
+    Options:
+            --help                  Print help.
+            --debug                 Print additional debugging info.
+            --configfilename=       Read configuration options from a
+                                    file (alt name is cf).  Default i
+                                    no file.  *Usually* this options
+                                    should be specified first (so that
+                                    overrides can be specified).
+            --remote=               Remote name for irsend (Reqd).
+            --transmitter=          Transmitter to set (multiple allowed)     
+                                    Default is none specified.
+            --beforekeys=           Keys to send before channel numbers.
+                                    Multiple allowed, or can be
+                                    specified as a string of keys 
+                                    (ex: "exit exit").  Default is none.
+            --afterkeys=            Keys to send after channel numbers.
+                                    Multiple allowed, or can be
+                                    specified as a string of keys
+                                    (ex: "enter end").  Default is none.
+            --delay=                Delay after key sends (can be 
+                                    fractional).  Default is 0.
+            --tdelay=               Delay after set_transmitter (can
+                                    be fractional).  Default is 0.
+            --bdelay=               Delay after each before key
+                                    (can be fractional).
+                                    Default is delay value.
+            --adelay=               Delay after each after key
+                                    (can be fractional).
+                                    Default is delay value.
+            --ddelay=               Delay after each digit key 
+                                    (can be fractional).
+                                    Default is delay value.
+            --rdelay=               Delay between repeated keys 
+                                    (can be fractional)
+                                    if needed by receiver to
+                                    discriminate between two identical
+                                    key presses (compensate for receiver
+                                    bounce compensation detection).
+                                    Default is 0.
+            --idelay=               Delay after initialization (and 
+                                    acquiring lock).  Default is 0.
+            --edelay=               Delay before exit (and releasing
+                                    lock).  Default is 0.
+            --device=               --device=<s> for irsend.
+                                    Default is irsend default.
+            --address=              --address=<s> for irsend.
+                                    Default is irsend default.
+            --channeldigits=        Some STBs will change the channel
+                                    faster if the exact number of
+                                    digits are sent with leading 0s.
+                                    Default is none.
+            --channeltransform=     Channel digit transform routine.
+                                    Mythtv allows one to send a string
+                                    for the channel number.  This
+                                    routine would transform the string
+                                    into keys for irsend.
+            --digitprefix=          Some remotes have now renamed and
+                                    prefixed the channel key names with
+                                    (usually) KEY_.  Specify
+                                    --digitprefix=KEY_ for
+                                    those.  NOTE: This *only* applies
+                                    to the channel digits (i.e.
+                                    '0' would be changed to 'KEY_0').
+                                    Default is no prefix.
+            --digitnames            Convert digits to names 
+                                    (i.e. 1 -> One).  Default is no
+                                    conversion.
+            --locktype=             'none', 'file', or 'semaphore' and
+                                    specifies the type of locking to
+                                    perform.  Default is 'semaphore'.
+            --lockfilename=         The lockfile name for locktype
+                                    'file'.  The default is
+                                    '/tmp/LircChannelChanger.lock'.
+            --lockkey=              The semaphore value for locktype
+                                    'semaphore'.  Default 727522346 
+                                    (an "arbitrary" value).
+            --lockperm=             The lockfile/semaphore permissions.
+                                    Default is 0777.
+            --lockfinegrained       Implement a fine grained locking
+                                    process where rather than locking
+                                    over the entire execution, the lock
+                                    is only obtained during the lirc
+                                    activities (results in numerous
+                                    lock/unlock activities), allowing,
+                                    in theory, greater parallelism of
+                                    channel tuning.  Except in the
+                                    case of (extremely) long delay
+                                    values, this is usually not
+                                    necessary, and is not recommended
+                                    (due to increased overheads, and
+                                    the possibility of additional lock
+                                    contention).
+            --precommand=           System commands (multiple allowed), 
+                                    usually quoted, to issue before
+                                    locking and irsend commands.
+                                    Ex: "power_up_stb".
+            --postcommand=          System commands (multiple allowed),
+                                    usually quoted, to issue after lock
+                                    release and before returning to
+                                    caller.  Ex: "/bin/sleep 2".
+                                    (might be useful where something
+                                    like HDPVR needs time to sync with
+                                    new source type).
+            --irsend=               The lirc irsend executable binary.
+                                    Default is 'irsend' which will
+                                    search PATH.
+
+       Note that option names can be abbreviated to the shortest unique name,
+       so, for example locktype can be shortened to lockt, since that is the
+       shortest unique value.
+
+ECHO
+    print $usage;
+    exit 1;     
+  }
+
+#
+# Do some option validation
+#
+
+#
+# The one mandatory option is "remote"
+#
+if ((!defined($remote)) || ("$remote" eq ''))
+  {
+    print "A remote name must be specified\n";
+    exit 1;
+  }
+
+#
+# Do some sanity checking of any other options specified
+#
+if (defined($delay) && ($delay < 0))
+  {
+    print "The delay value must be positive\n";
+    exit 1;
+  }
+if (defined($tdelay) && ($tdelay < 0))
+  {
+    print "The tdelay value must be positive\n";
+    exit 1;
+  }
+if (defined($bdelay) && ($bdelay < 0))
+  {
+    print "The bdelay value must be positive\n";
+    exit 1;
+  }
+if (defined($adelay) && ($adelay < 0))
+  {
+    print "The adelay value must be positive\n";
+    exit 1;
+  }
+if (defined($ddelay) && ($ddelay < 0))
+  {
+    print "The ddelay value must be positive\n";
+    exit 1;
+  }
+if (defined($rdelay) && ($rdelay < 0))
+  {
+    print "The rdelay value must be positive\n";
+    exit 1;
+  }
+if (defined($idelay) && ($idelay < 0))
+  {
+    print "The idelay value must be positive\n";
+    exit 1;
+  }
+if (defined($edelay) && ($edelay < 0))
+  {
+    print "The edelay value must be positive\n";
+    exit 1;
+  }
+if (defined($channeldigits) && (($channeldigits < 0) || ($channeldigits > 10)))
+  {
+    print "The channeldigits value must be positive and no greater than 10\n";
+    exit 1;
+  }
+if (scalar(@transmitters) > 0)
+  {
+    foreach (@transmitters)
+      {
+        if (("$_" !~ /^\d+$/) || ($_ < 1) || ($_ > 32))
+          {
+            print "The transmitter value must be an integer between 1 and 32 (inclusive)\n";
+            exit 1;
+          }
+      }
+  }
+if (("$locktype" ne 'none') && ("$locktype" ne 'semaphore') && ("$locktype" ne 'file'))
+  {
+    print "The locktype must be none, file, or semaphore\n";
+    exit 1;
+  }
+if (defined($locksemkey) && ($locksemkey < 0))
+  {
+    print "The lockkey value must be positive\n";
+    exit 1;
+  }
+if (defined($channeltransform))
+  {
+    if (! -e "$channeltransform")
+      {
+        print "The channeltransform program was not found (not in PATH?) \n";
+        exit 1;
+      }
+    if (! -x "$channeltransform")
+      {
+        print "The channeltransform program must be executable\n";
+        exit 1;
+      }
+  }
+
+#
+# Make sure debugging output makes it out
+#
+if ($debug)
+  {
+    select(STDERR); $| = 1;             # make unbuffered
+    select(STDOUT); $| = 1;             # make unbuffered
+  }
+
+#
+# Simplify delay checks later
+#
+$delay = 0 if (!defined($delay));
+$bdelay = $delay if (!defined($bdelay));
+$adelay = $delay if (!defined($adelay));
+$ddelay = $delay if (!defined($ddelay));
+
+#
+# Build up irsend options string
+#
+$irsendoptions .= " --address=$address" if (defined($address) && ("$address" ne ''));
+$irsendoptions .= " --device=$device" if (defined($device) && ("$device" ne ''));
+
+#
+# Create our locks early (early exit if we can not do so)
+#
+lockCreate();
+
+#
+# Process pre commands (issued before ir locking)
+#
+foreach (@precmds)
+  {
+    cmd("$_");
+  }
+
+#
+# Try to prevent multiple processes using the IR transciever
+# by obtaining a lock (if not doing fined grained locking)
+#
+if ($lockfinegrain == 0)
+  {
+    if (!lockGet())
+      {
+        print "Unable to aquire lock\n";
+        exit 1;
+      }
+    else
+      {
+        printf STDERR "Lock acquired\n" if($debug);
+      }
+  }
+
+#
+# If requested, sleep at initialization
+#
+delayAccumulate($idelay, "due to initialization");
+
+#
+# Send the before keys, if any specified
+#
+foreach $key (@before)
+  {
+    delayAccumulate($rdelay, "due to repeated key") if ("$key" eq "$prevkey");
+    delaySleep();
+    irsend("SEND_ONCE $remote $key");
+    $prevkey = "$key";
+    delayAccumulate($bdelay, "after before key");
+  }
+
+#
+# What remains is the channel number,
+# although technically it is the "freqid"
+# column, which may need to be transformed
+# by an external script (if channeltransform
+# is specified).  While not normally required,
+# we support the capability for those special
+# cases (and there are always special cases).
+#
+@FREQID = @ARGV;
+if (defined($channeltransform))
+  {
+    my $a = join(' ', @FREQID);
+    my $t = `$channeltransform $a`;
+    chomp($t);
+    print STDERR "transformed freqid $a into $t\n" if($debug);
+    @FREQID = split(/ /,"$t");
+  }
+
+#
+# What remains should be the channel number
+# If the "token" appears to be an integer,
+# we will treat it as a channel number,
+# otherwise, just send along the key(s)
+#
+foreach $key (@FREQID)
+  {
+    if ($key =~ /^\d+$/)
+      {
+        my $digit;
+        if (defined($channeldigits) && (($channeldigits > 0) && ($channeldigits > length($key))))
+          {
+            $key = substr('0000000000' . $key, (-$channeldigits));
+          }
+        foreach $digit (split(//,$key))
+          {
+            if (defined($digitnames) && ($digitnames))
+              {
+                if (defined($digitname{$digit}))
+                  {
+                    $digit = $digitname{$digit};
+                  }
+              }
+            $digit = "$digitprefix" . $digit if (defined($digitprefix));
+            delayAccumulate($rdelay, "due to repeated key") if ("$digit" eq "$prevkey");
+            delaySleep();
+            irsend("SEND_ONCE $remote $digit");
+            $prevkey = "$digit";
+            delayAccumulate($ddelay, "after digit key");
+          }
+      }
+    else
+      {
+        delayAccumulate($rdelay, "due to repeated key") if ("$key" eq "$prevkey");
+        delaySleep();
+        irsend("SEND_ONCE $remote $key");
+        $prevkey = "$key";
+        delayAccumulate($ddelay, "after digit key");
+      }
+  }
+
+#
+# Send the after keys, if any specified
+#
+foreach $key (@after)
+  {
+    delayAccumulate($rdelay, "due to repeated key") if ("$key" eq "$prevkey");
+    delaySleep();
+    irsend("SEND_ONCE $remote $key");
+    $prevkey = "$key";
+    delayAccumulate($adelay, "after after key");
+  }
+
+#
+# If requested, sleep before exiting (but zero accumulator)
+#
+if ($delayaccum != 0)
+  {
+    printf STDERR "zeroing delay accumulator after lirc commands\n" if ($debug);
+    $delayaccum = 0;
+  }
+delayAccumulate($edelay, "due to exit");
+delaySleep();
+
+#
+# IR operations complete, release the lock (if not fine grained locking)
+#
+if ($lockfinegrain == 0)
+  {
+    if (!lockFree())
+      {
+        print "Unable to free lock\n";
+        exit 1;
+      }
+    else
+      {
+        printf STDERR "Lock freed\n" if($debug);
+      }
+  }
+
+#
+# Process post commands (issued after ir unlocking)
+#
+foreach (@postcmds)
+  {
+    cmd("$_");
+  }
+
+#
+# Nothing more to do here.
+#
+exit 0;
+
+
+
+#
+# lockCreate
+#
+sub lockCreate
+  {
+    printf STDERR "lockCreate for lock type $locktype\n" if ($debug);
+    return 1 if ("$locktype" eq 'none');
+    if ("$locktype" eq 'semaphore')
+      {
+        printf STDERR "Creating lock semaphore %i (0x%x)\n", ($locksemkey, $locksemkey) if ($debug);
+        $locksem = IPC::Semaphore->new($locksemkey, 3, ($lockperm & 0666) | S_IRUSR | S_IWUSR | IPC_CREAT);
+        if (!defined($locksem))
+          {
+            printf "Unable to create lock semaphore %i (0x%x): $!\n", ($locksemkey, $locksemkey);
+            exit 1;
+          }
+        return 1;
+      }
+    else
+      {
+        my ($fname, $dir) = fileparse("$lockfile");
+        if ("$fname" eq '')
+          {
+            print "Specified lockfile $lockfile is a path only\n";
+            exit 1;
+          }
+        my $umask;
+        my $err;
+        $umask=umask();
+        umask(0);
+        print STDERR "Creating lockfile directory $dir\n" if ($debug);
+        make_path("$dir", {verbose => 0, mode => $lockperm, error => \$err});
+        umask($umask);
+        if (@$err)
+          {
+            for my $diag (@$err)
+              {
+                my ($file, $message) = %$diag;
+                if ($file eq '')
+                  {
+                    print "Error while attempting to create directory $dir: $message\n";
+                  }
+                else
+                  {
+                    print "Error while attempting to create directory $file: $message\n";
+                  }
+              }
+            exit 1;
+          }
+        $umask=umask();
+        umask(0);
+        print STDERR "Creating lockfile $lockfile\n" if ($debug);
+        if (!(sysopen($lockFH, "$lockfile", (O_CREAT | O_RDWR | O_LARGEFILE) , $lockperm)))
+          {
+            print "Unable to create lockfile $lockfile: $!\n";
+            umask($umask);
+            exit 1;
+          }
+        umask($umask);
+        close($lockFH);
+        return 1;
+      }
+  }
+
+#
+# lockGet
+#
+sub lockGet
+  {
+    printf STDERR "lockGet for lock type $locktype\n" if ($debug);
+    return 1 if ("$locktype" eq 'none');
+    if ("$locktype" eq 'semaphore')
+      {
+        my $i;
+        for ($i=0; $i<$lockattempts; $i++)
+          {
+            # Use IPC::Shareable / IPC::ShareLite semaphore protocol
+            if ($locksem->op(1, 0, IPC_NOWAIT,                  # Check for no readers
+                             2, 0, IPC_NOWAIT,                  # Check for no writers
+                             2, 1, (SEM_UNDO | IPC_NOWAIT)))    # Acquire write lock
+              {
+                $lockobtained = 1;
+                return 1;
+              }
+            print STDERR "Waiting for lock....\n" if ($debug);
+            sleep($lockwait);
+          }
+        return 0;
+      }
+    else
+      {
+        if (open($lockFH, "+<$lockfile"))
+          {
+            my $i;
+            for ($i=0; $i<$lockattempts; $i++)
+              {
+                if (flock($lockFH, LOCK_EX | LOCK_NB))
+                  {
+                    $lockobtained = 1;
+                    return 1;
+                  }
+                print STDERR "Waiting for lock.....\n" if ($debug);
+                sleep($lockwait);
+              }
+            return 0;
+          }
+        print STDERR "Unable to open lockfile $lockfile: $!\n" if ($debug);
+        return 0;
+      }
+  }
+
+#
+# lockFree
+#
+sub lockFree
+  {
+    printf STDERR "lockFree for lock type $locktype\n" if ($debug);
+    return 1 if ("$locktype" eq 'none');
+    if ("$locktype" eq 'semaphore')
+      {
+        $locksem->op(2, -1, (SEM_UNDO | IPC_NOWAIT));
+        $lockobtained = 0;
+        return 1;
+      }
+    else
+      {
+        if (defined($lockFH))
+          {
+            flock($lockFH, LOCK_UN);
+            close($lockFH);
+            undef $lockFH;
+          }
+        $lockobtained = 0;
+        return 1;
+      }
+  }
+
+#
+# cmd
+#
+sub cmd
+  {
+    my $cmd = shift;
+    print STDERR "Issuing system command: $cmd\n" if ($debug);
+    system("$cmd");
+    if ($? == 0)
+      {
+        print STDERR "  child exited with value $?\n" if ($debug);
+      }
+    elsif ($? == -1)
+      {
+        print STDERR "  failed to execute $cmd: $!\n";
+      }
+    elsif ($? & 127)
+      {
+        printf STDERR "  child died with signal %d, %s coredump\n",
+            ($? & 127),  ($? & 128) ? 'with' : 'without';
+      }
+    else
+      {
+        printf STDERR "  child exited with value %d\n", $? >> 8;
+      }
+    return $?;
+}
+
+#
+# irsend
+#
+sub irsend
+  {
+    my $ircmd = shift;
+    my $rc = 0;
+    delaySleep();
+    # Are we doing fine grained locking?
+    if ($lockfinegrain != 0)
+      {
+        # Fine grained locking, we need to acquire the lock,
+        # (re)issue the SET_TRANSMITTERS, issue the irsend
+        # command, and then release the lock.
+
+        if (!lockGet())
+          {
+            print "Unable to aquire lock\n";
+            exit 1;
+          }
+        else
+          {
+            printf STDERR "Lock acquired\n" if($debug);
+          }
+
+        if (scalar(@transmitters) > 0)
+          {
+            my $emitters = join(' ', @transmitters);
+            cmd("$irsend $irsendoptions SET_TRANSMITTERS $emitters");
+            delayAccumulate($tdelay, "after set_transmitters");
+          }
+
+        delaySleep();
+        $rc = cmd("$irsend $irsendoptions $ircmd");
+
+        if (!lockFree())
+          {
+            print "Unable to free lock\n";
+            exit 1;
+          }
+        else
+          {
+            printf STDERR "Lock freed\n" if($debug);
+          }
+
+      }
+    else
+      {
+        # No fine grained locking.  Just issue the irsend
+        if (($irsendxmitter == 0) && (scalar(@transmitters) > 0))
+          {
+            # Issue set transmitters if we have not yet done so
+            my $emitters = join(' ', @transmitters);
+            delaySleep();
+            cmd("$irsend $irsendoptions SET_TRANSMITTERS $emitters");
+            delayAccumulate($tdelay, "after set_transmitters");
+            $irsendxmitter = 1;
+          }
+        delaySleep();
+        $rc = cmd("$irsend $irsendoptions $ircmd");
+      }
+    return $rc;
+  }
+
+#
+# delaySleep - sleep for the accumulated delay (if any)
+#
+sub delaySleep
+  {
+    return 0 if ($delayaccum == 0);
+    print STDERR "sleeping for the accumulated delay $delayaccum\n" if($debug);
+    sleep($delayaccum);
+    $delayaccum = 0;
+  }
+
+#
+# delayAccumulate - Add in additional delay
+#
+sub delayAccumulate
+  {
+    my $delay = shift;
+    my $reason = shift;
+    return 0 if ($delay == 0);
+    print STDERR "adding $delay to delay accumulator: $reason\n" if ($debug);
+    $delayaccum += $delay;
+    return $delay;
+  }
+
+#
+# processConfig
+#
+sub processConfig
+  {
+
+    my $cf = shift;
+
+    #
+    # If a config file specified, read in the config file
+    #
+    if (defined($cf) && ("$cf" ne ''))
+      {
+        my $options = '';
+        printf STDERR "Opening configuration file $cf\n" if ($debug);
+        if (open(FH,"<$cf"))
+          {
+            my $k; my $v;
+            while(<FH>)
+              {
+                chomp;
+                print STDERR "Reading configuration file line: $_\n" if ($debug);
+                s/(.*?)\#.*/$1/;         # Remove trailing comments
+                next if /^\s*(\#.*)?$/;  # Skip comments and blanks.
+                s/^\s+//;
+                s/\s+$//;
+                $_ = "--" . "$_" if ("$_" !~ /^-/);
+                $options = "$options" . ' ' . "$_";
+              }
+            close(FH);
+          }
+        if ("$options" ne '')
+          {
+            if (!GetOptionsFromString($options,
+                  "device=s"                     => \$device,
+                  "address=s"                    => \$address,
+                  "delay=f"                      => \$delay,
+                  "tdelay=f"                     => \$tdelay,
+                  "bdelay=f"                     => \$bdelay,
+                  "adelay=f"                     => \$adelay,
+                  "ddelay=f"                     => \$ddelay,
+                  "rdelay=f"                     => \$rdelay,
+                  "idelay=f"                     => \$idelay,
+                  "edelay=f"                     => \$edelay,
+                  "xmitter|transmitter=i"        => \@transmitters,
+                  "beforekeys=s"                 => sub { push @before, split(' ', (@_[1]))},
+                  "afterkeys=s"                  => sub { push @after, split(' ', (@_[1]))},
+                  "digitprefix=s"                => \$digitprefix,
+                  "digitnames!"                  => \$digitnames,
+                  "channeldigits=i"              => \$channeldigits,
+                  "channeltransform=s"           => \$channeltransform,
+                  "remote=s"                     => \$remote,
+                  "cf|configfilename=s"          => sub { processConfig(@_[1]) },
+                  "locktype=s"                   => \$locktype,
+                  "lockfilename=s"               => \$lockfile,
+                  "lockkey=o"                    => \$locksemkey,
+                  "lockperm=o"                   => \$lockperm,
+                  "lockfinegrained!"             => \$lockfinegrain,
+                  "precmd|precommand=s"          => \@precmds,
+                  "postcmd|postcommand=s"        => \@postcmds,
+                  "irsend=s"                     => \$irsend,
+                  "debug!"                       => \$debug))
+              {
+                exit 1;
+              }
+          }
+        else
+          {
+            print "Unable to open the configuration file $cf: $!\n";
+            exit 1;
+          }
+      }
+
+  }

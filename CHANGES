@@ -1,0 +1,44 @@
+
+Latest changes are at the top
+
+
+
+version 0.4        2012-08-08
+=============================
+
+* Provide error response for lock creation failures
+  (thanks to Tom Metro for identifing error and proposed patch)
+* Change locking permissions to 0777 by default
+  (thanks to Tom Metro for pointing out the shared use issue)
+* Support fine grained locking (not usually recommended)
+* Check more function/commands for success 
+* New options to support permissions, fine grained locking
+  which resulted in some code refactoring
+* Correct file locking implementation
+* Minor editorial corrections for help
+* github project created
+
+
+version 0.3        2012-02-20
+=============================
+
+* Change license to Apache
+* Add in pre/postcommand support
+* Command system call common processing
+
+
+version 0.2        2011-11-28
+=============================
+
+* Modifications for additional delay locations
+* Delay accumulator (wait once for all accumulated delays)
+* Various code refactors (removing some ugliness)
+* First version placed on the MythTV wiki
+
+
+version 0.1        2009-08-21
+=============================
+
+* Initial release (The "it works for me" edition)
+
+

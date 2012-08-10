@@ -1,0 +1,25 @@
+#
+# Configuration file for the LircChannelChanger script
+#
+# Except for the configfile option, all other options
+# specified on the command line can be specified in
+# this file.  Comments ('#') are stripped, and options
+# that are not prefixed with '--' have the '--' added.
+#
+# The main reason for supporting a configfile is
+# that the command line for the LircChannelChanger script
+# could exceed the 128 character (database) size limits
+# if many options were specified (and fully typed out).
+# In particular, the before or after commands with long
+# remote strings.
+#
+remote          MotorolaDTA100-PaceDC50X   # lirc remote name
+delay           .2          # .2 seconds is long enough for reliable tuning
+rdelay          .2          # Add in .2 seconds for debounce compensation
+                            # compensation (not clear if needed)
+channeldigits   3           # Tunes faster with 3 digits (no timeout reqd)
+digitprefix     KEY_        # lirc file has keys prefixed with KEY_
+                            # so sending 0 requires the name KEY_0
+beforekeys      KEY_INFO    # Return from extended info screen, if on it,
+                            # otherwise this puts up the channel info,
+                            # which you get anyway when tuning....

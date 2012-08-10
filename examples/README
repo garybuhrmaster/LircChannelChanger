@@ -1,0 +1,14 @@
+Contents of this directory:
+
+  LircChannelChanger-DTA
+
+    Example configuration file for using with a
+    Comcast DTA.
+
+  ExternalChannelChanger
+
+    The command to enter into the mythtv-setup
+    screen for an external channel changer script
+    that would use the LircChannelChanger-DTA
+    configuration, and uses the first transmitter
+    on a multi-transmitter IR blaster. 

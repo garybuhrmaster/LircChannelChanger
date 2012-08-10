@@ -1,0 +1,12 @@
+LircChannelChanger
+
+LircChannelChanger is a perl script intended for use with the
+MythTV (http://www.mythtv.org) open source DVR project.  It
+providers an external channel changing script using LIRC
+(http://www.lirc.org) the Linux Infrared Remote Control programs.
+
+LircChannelChanger supports a large number of options in order
+to handle a signficant subset of the requirements of those that
+need an external channel changing script using LIRC.
+
+Development and testing has been performed only on Linux.
