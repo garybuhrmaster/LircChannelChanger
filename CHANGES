@@ -11,7 +11,7 @@ version 0.4        2012-08-08
 * Change locking permissions to 0777 by default
   (thanks to Tom Metro for pointing out the shared use issue)
 * Support fine grained locking (not usually recommended)
-* Check more function/commands for success 
+* Check more function/commands for success
 * New options to support permissions, fine grained locking
   which resulted in some code refactoring
 * Correct file locking implementation

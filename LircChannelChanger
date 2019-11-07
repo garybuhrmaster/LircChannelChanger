@@ -30,7 +30,7 @@
 # is being run at once (this is important with multiple tuners and
 # with multiple programs independently running/changing channels
 # since irsend "SET_TRANSMITTERS" is global).
-# 
+#
 
 #
 # Our perl dependencies
@@ -94,7 +94,7 @@ my $irsend        = 'irsend';        # Lirc irsend program
 my $irsendxmitter = 0;               # Set transmitter sent
 
 my %digitname;
-   $digitname{0}  = 'Zero'; 
+   $digitname{0}  = 'Zero';
    $digitname{1}  = 'One';
    $digitname{2}  = 'Two';
    $digitname{3}  = 'Three';
@@ -134,7 +134,7 @@ END
 # Again, *should* not be needed, since process termination
 # is expected to clean up correctly.  But better safe....
 #
-$SIG{INT} = $SIG{TERM} = $SIG{QUIT} = $SIG{HUP} = sub { my $sig = shift; die "\nSIG$sig received: $!\n"}; 
+$SIG{INT} = $SIG{TERM} = $SIG{QUIT} = $SIG{HUP} = sub { my $sig = shift; die "\nSIG$sig received: $!\n"};
 
 #
 # Use GetOptions to process the command line options
@@ -193,17 +193,17 @@ $Script:
                                     should be specified first (so that
                                     overrides can be specified).
             --remote=               Remote name for irsend (Reqd).
-            --transmitter=          Transmitter to set (multiple allowed)     
+            --transmitter=          Transmitter to set (multiple allowed)
                                     Default is none specified.
             --beforekeys=           Keys to send before channel numbers.
                                     Multiple allowed, or can be
-                                    specified as a string of keys 
+                                    specified as a string of keys
                                     (ex: "exit exit").  Default is none.
             --afterkeys=            Keys to send after channel numbers.
                                     Multiple allowed, or can be
                                     specified as a string of keys
                                     (ex: "enter end").  Default is none.
-            --delay=                Delay after key sends (can be 
+            --delay=                Delay after key sends (can be
                                     fractional).  Default is 0.
             --tdelay=               Delay after set_transmitter (can
                                     be fractional).  Default is 0.
@@ -213,17 +213,17 @@ $Script:
             --adelay=               Delay after each after key
                                     (can be fractional).
                                     Default is delay value.
-            --ddelay=               Delay after each digit key 
+            --ddelay=               Delay after each digit key
                                     (can be fractional).
                                     Default is delay value.
-            --rdelay=               Delay between repeated keys 
+            --rdelay=               Delay between repeated keys
                                     (can be fractional)
                                     if needed by receiver to
                                     discriminate between two identical
                                     key presses (compensate for receiver
                                     bounce compensation detection).
                                     Default is 0.
-            --idelay=               Delay after initialization (and 
+            --idelay=               Delay after initialization (and
                                     acquiring lock).  Default is 0.
             --edelay=               Delay before exit (and releasing
                                     lock).  Default is 0.
@@ -248,7 +248,7 @@ $Script:
                                     to the channel digits (i.e.
                                     '0' would be changed to 'KEY_0').
                                     Default is no prefix.
-            --digitnames            Convert digits to names 
+            --digitnames            Convert digits to names
                                     (i.e. 1 -> One).  Default is no
                                     conversion.
             --locktype=             'none', 'file', or 'semaphore' and
@@ -258,7 +258,7 @@ $Script:
                                     'file'.  The default is
                                     '/tmp/LircChannelChanger.lock'.
             --lockkey=              The semaphore value for locktype
-                                    'semaphore'.  Default 727522346 
+                                    'semaphore'.  Default 727522346
                                     (an "arbitrary" value).
             --lockperm=             The lockfile/semaphore permissions.
                                     Default is 0777.
@@ -276,7 +276,7 @@ $Script:
                                     (due to increased overheads, and
                                     the possibility of additional lock
                                     contention).
-            --precommand=           System commands (multiple allowed), 
+            --precommand=           System commands (multiple allowed),
                                     usually quoted, to issue before
                                     locking and irsend commands.
                                     Ex: "power_up_stb".
@@ -297,7 +297,7 @@ $Script:
 
 ECHO
     print $usage;
-    exit 1;     
+    exit 1;
   }
 
 #
